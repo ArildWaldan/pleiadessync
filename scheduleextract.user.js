@@ -10,7 +10,7 @@
 
 async function fetchICSFromGitHub() {
     const url = "https://api.github.com/repos/ArildWaldan/pleiadessync/contents/test.ics";
-    const token = "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";
+    const token = "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";
 
     try {
         const response = await fetch(url, {

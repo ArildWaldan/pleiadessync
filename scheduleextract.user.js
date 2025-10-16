@@ -8,6 +8,151 @@
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
+const SYNC_BUTTON_ID = "pta-sync-schedule-button";
+const SYNC_BUTTON_STYLE_ID = "pta-sync-button-style";
+
+function injectSyncButtonStyles() {
+    if (document.getElementById(SYNC_BUTTON_STYLE_ID)) {
+        return;
+    }
+
+    const style = document.createElement("style");
+    style.id = SYNC_BUTTON_STYLE_ID;
+    style.textContent = `
+        .pta-sync-button-wrapper {
+            display: inline-flex;
+            gap: 0.5rem;
+            align-items: center;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body > .pta-sync-button-wrapper {
+            position: fixed;
+            top: 1.5rem;
+            right: 1.5rem;
+            z-index: 1000;
+        }
+
+        #${SYNC_BUTTON_ID} {
+            background: linear-gradient(180deg, #59a5ff 0%, #1b6dd8 100%);
+            border: 1px solid #1452a1;
+            border-radius: 20px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            padding: 0.6rem 1.4rem;
+            box-shadow: 0 6px 18px rgba(23, 92, 197, 0.35);
+            transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease;
+        }
+
+        #${SYNC_BUTTON_ID}:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 24px rgba(23, 92, 197, 0.45);
+            background: linear-gradient(180deg, #64adff 0%, #2c7deb 100%);
+        }
+
+        #${SYNC_BUTTON_ID}:active {
+            transform: translateY(1px);
+            box-shadow: 0 4px 12px rgba(14, 60, 130, 0.4);
+        }
+
+        #${SYNC_BUTTON_ID}[data-busy="true"] {
+            cursor: wait;
+            opacity: 0.75;
+            pointer-events: none;
+        }
+
+        .pta-sync-status {
+            color: #0b3d91;
+            font-size: 13px;
+            background: rgba(255, 255, 255, 0.85);
+            padding: 0.4rem 0.8rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+        }
+
+        .pta-sync-status[data-variant="success"] {
+            color: #0f7a2d;
+        }
+
+        .pta-sync-status[data-variant="error"] {
+            color: #b2001d;
+        }
+    `;
+
+    document.head.appendChild(style);
+}
+
+function createSyncButtonContainer() {
+    const wrapper = document.createElement("div");
+    wrapper.className = "pta-sync-button-wrapper";
+
+    const button = document.createElement("button");
+    button.id = SYNC_BUTTON_ID;
+    button.type = "button";
+    button.textContent = "Sync Schedule";
+
+    const status = document.createElement("span");
+    status.className = "pta-sync-status";
+    status.hidden = true;
+
+    wrapper.appendChild(button);
+    wrapper.appendChild(status);
+
+    return { wrapper, button, status };
+}
+
+function insertSyncButton(onClick) {
+    injectSyncButtonStyles();
+
+    const existing = document.getElementById(SYNC_BUTTON_ID);
+    if (existing) {
+        return {
+            button: existing,
+            status: existing.nextElementSibling instanceof HTMLElement ? existing.nextElementSibling : null
+        };
+    }
+
+    const { wrapper, button, status } = createSyncButtonContainer();
+    button.addEventListener("click", () => onClick({ button, status }));
+
+    const preferredTargets = [
+        "#zoneMenuDroite",
+        "#zoneDroiteEntete",
+        "#enteteDroite",
+        "header .entete-droite",
+        "#EnteteDroite",
+        "#Entete",
+        "body"
+    ];
+
+    let host = document.body;
+    for (const selector of preferredTargets) {
+        const candidate = document.querySelector(selector);
+        if (candidate) {
+            host = candidate;
+            break;
+        }
+    }
+
+    if (host === document.body) {
+        document.body.appendChild(wrapper);
+    } else {
+        host.appendChild(wrapper);
+    }
+
+    return { button, status };
+}
+
+function setSyncStatus(ui, message, variant = "info") {
+    if (!ui || !ui.status) return;
+
+    ui.status.textContent = message;
+    ui.status.hidden = !message;
+    ui.status.dataset.variant = variant;
+}
+
 async function fetchICSFromGitHub() {
     const url = "https://api.github.com/repos/ArildWaldan/pleiadessync/contents/test.ics";
     const token = "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";
@@ -224,34 +369,68 @@ async function commitToGitHub(content, sha) {
         }
     } catch (error) {
         console.error("Error during GitHub commit:", error);
+        throw error;
     }
 }
 
-(async function () {
+async function runSync(ui) {
     try {
-        // Step 1: Fetch existing ICS from GitHub
+        if (ui && ui.button) {
+            ui.button.dataset.busy = "true";
+        }
+        setSyncStatus(ui, "Sync in progress…");
+
         const existingICSData = await fetchICSFromGitHub();
-        if (!existingICSData) return;
+        if (!existingICSData) {
+            setSyncStatus(ui, "Unable to reach GitHub", "error");
+            return;
+        }
 
         const { content: existingICS, sha } = existingICSData;
 
-        // Step 2: Log existing ICS for debugging
         console.log("Existing ICS:", existingICS);
 
-        // Step 3: Fetch and parse schedule from the page
         const html = await fetchSchedulePage();
         const scheduleData = parseSchedule(html);
 
-        // Step 4: Merge new schedule data with existing ICS
         const mergedICS = mergeAndUpdateICS(scheduleData, existingICS);
 
         if (mergedICS === existingICS) {
             console.log("No changes to update.");
+            setSyncStatus(ui, "Schedule already up to date.", "success");
         } else {
-            // Step 5: Commit updated ICS back to GitHub
             await commitToGitHub(mergedICS, sha);
+            setSyncStatus(ui, "Schedule synced successfully!", "success");
         }
     } catch (error) {
         console.error("Error during script execution:", error);
+        setSyncStatus(ui, "Sync failed. Check console.", "error");
+    } finally {
+        if (ui && ui.button) {
+            ui.button.dataset.busy = "false";
+        }
+        if (ui && ui.status && ui.status.hidden) {
+            ui.status.hidden = false;
+        }
     }
-})();
+}
+
+function initSyncButton() {
+    const ui = insertSyncButton(async (elements) => {
+        await runSync(elements);
+    });
+
+    return ui;
+}
+
+function bootstrap() {
+    const ui = initSyncButton();
+    // Trigger an initial sync but do not block the UI creation.
+    runSync(ui);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+} else {
+    bootstrap();
+}
